@@ -18,6 +18,18 @@ subjects:
     name: jenkins
     namespace: devops-lab
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jenkins-pvc
+  namespace: devops-lab
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,19 +48,21 @@ spec:
         app: jenkins
     spec:
       serviceAccountName: jenkins
+      # Permisos necesarios para el socket de Docker y carpetas de Jenkins
       securityContext:
         fsGroup: 1000
-        runAsUser: 1000
       initContainers:
-        - name: install-kubectl
-          image: bitnami/kubectl:latest
-          command: ['sh', '-c', 'cp /opt/bitnami/kubectl/bin/kubectl /mnt/kubectl/kubectl && chmod +x /mnt/kubectl/kubectl']
+        - name: install-tools
+          image: docker:26.0.0 # Usamos una versión moderna para evitar el error de API
+          command: ["sh", "-c", "cp /usr/local/bin/docker /mnt/tools/docker && chmod +x /mnt/tools/docker && apk add --no-cache curl && curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl && chmod +x kubectl && mv kubectl /mnt/tools/"]
           volumeMounts:
-            - name: kubectl-bin
-              mountPath: /mnt/kubectl
+            - name: tools-bin
+              mountPath: /mnt/tools
       containers:
         - name: jenkins
           image: jenkins/jenkins:lts-jdk17
+          securityContext:
+            runAsUser: 0 # Root necesario para interactuar con /var/run/docker.sock en laboratorios
           ports:
             - containerPort: 8080
               name: http
@@ -56,7 +70,7 @@ spec:
               name: agent
           env:
             - name: JAVA_OPTS
-              value: "-Djenkins.install.runSetupWizard=false -Xmx1g"
+              value: "-Djenkins.install.runSetupWizard=true -Xmx1g"
           resources:
             requests:
               memory: "1Gi"
@@ -67,14 +81,23 @@ spec:
           volumeMounts:
             - name: jenkins-home
               mountPath: /var/jenkins_home
-            - name: kubectl-bin
+            - name: tools-bin
               mountPath: /usr/local/bin/kubectl
               subPath: kubectl
+            - name: tools-bin
+              mountPath: /usr/local/bin/docker
+              subPath: docker
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
       volumes:
         - name: jenkins-home
+          persistentVolumeClaim:
+            claimName: jenkins-pvc
+        - name: tools-bin
           emptyDir: {}
-        - name: kubectl-bin
-          emptyDir: {}
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
 ---
 apiVersion: v1
 kind: Service

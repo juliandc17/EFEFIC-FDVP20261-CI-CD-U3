@@ -31,7 +31,7 @@ spec:
           # La imagen se actualiza automáticamente por el pipeline Jenkins:
           #   kubectl set image deployment/devops-app devops-app=TU_USUARIO/devops-app:latest
           # En el primer despliegue manual, reemplaza TU_DOCKER_HUB_USERNAME:
-          image: YOUR_DOCKERHUB_USERNAME/devops-app:latest
+          image: juliandc17/devops-app:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
