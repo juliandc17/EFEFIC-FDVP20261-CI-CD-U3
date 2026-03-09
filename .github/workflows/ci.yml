@@ -219,7 +219,7 @@ jobs:
           echo "- SHA: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
 
   # ════════════════════════════════════════════════
-  # JOB 5 — MCP K8s: Verificar estado del clúster
+  # JOB 5 — MCP K8s: Verificar estado del clúster.
   # ════════════════════════════════════════════════
   mcp-health-check:
     name: 🤖 MCP K8s — Health Check
