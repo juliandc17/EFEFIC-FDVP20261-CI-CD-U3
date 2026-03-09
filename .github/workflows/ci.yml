@@ -86,7 +86,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           mvn verify sonar:sonar \
-            -Dsonar.projectKey=devops-app \
+            -Dsonar.projectKey=EFEFIC-FDVP20261-CI-CD-U3 \
             -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }} \
             -Dsonar.host.url=https://sonarcloud.io \
             -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
@@ -130,7 +130,7 @@ jobs:
           args: --severity-threshold=high --sarif-file-output=snyk-deps.sarif
 
       - name: Publicar resultados en GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: snyk-deps.sarif
