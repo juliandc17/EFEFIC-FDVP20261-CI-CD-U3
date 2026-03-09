@@ -13,20 +13,6 @@
 
 ---
 
-## 🎯 Objetivos Cumplidos
-
-| Criterio | Herramienta | Estado |
-|---|---|---|
-| Pipeline CI funcional | GitHub Actions | ✅ ci.yml — 5 jobs |
-| Pipeline CD funcional | Jenkins on K8s | ✅ Jenkinsfile — 7 stages |
-| Análisis estático de código | SonarQube / SonarCloud | ✅ Quality Gate integrado |
-| Vulnerabilidades en dependencias | Snyk | ✅ SARIF → GitHub Security |
-| Recolección de métricas | Prometheus | ✅ scraping automático vía anotaciones |
-| Dashboards de visualización | Grafana | ✅ JVM + K8s + alertas |
-| Despliegue en Kubernetes | Docker Desktop K8s | ✅ namespace devops-lab |
-| MCP K8s Server | Node.js MCP | ✅ 6 tools — pipeline + Claude Desktop |
-
----
 
 ## 🏗️ Arquitectura
 
@@ -234,14 +220,31 @@ Servidor MCP local integrado al pipeline y compatible con Claude Desktop.
   }
 }
 ```
+## Evidencias
 
----
 
-## 📚 Información Académica
+## Pipeline CI — GitHub Actions
+![CI Pipeline — 5 jobs en verde](docs/screenshots/01-ci-verde.png)
+![Job 1 Maven — BUILD SUCCESS](docs/screenshots/02-maven-build.png)
 
-| Campo | Valor |
-|---|---|
-| Curso | EFEFIC-FDVP20261 |
-| Módulo | Unidad 3 — CI/CD Seguridad y Monitoreo |
-| Entregable | Segundo entregable — Fase de Implementación |
-| Metodología | Aprendizaje Basado en Proyectos (ABP) |
+## Seguridad — DevSecOps
+![SonarCloud — Quality Gate Passed](docs/screenshots/03-sonarcloud.png)
+![GitHub Security — Snyk alerts](docs/screenshots/04-snyk-security.png)
+
+## Pipeline CD — Jenkins
+![Jenkins Stage View — 7 stages en verde](docs/screenshots/05-jenkins-stages.png)
+![Jenkins Stage MCP — respuesta JSON get_pods](docs/screenshots/06-jenkins-mcp.png)
+
+## Kubernetes
+![kubectl get pods — todos Running](docs/screenshots/07-pods-running.png)
+
+## Monitoreo — Prometheus
+![Prometheus Targets — todos UP](docs/screenshots/08-prometheus-targets.png)
+
+## Monitoreo — Grafana
+![Grafana — Datasource Prometheus activo](docs/screenshots/09-grafana-datasource.png)
+![Grafana — Dashboard JVM con métricas](docs/screenshots/10-grafana-jvm.png)
+![Grafana — Dashboard Kubernetes](docs/screenshots/11-grafana-kubernetes.png)
+
+## Aplicación
+![App — GET /actuator/health status UP](docs/screenshots/12-app-health.png)
