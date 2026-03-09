@@ -19,6 +19,12 @@ jobs:
   build-and-test:
     name: 🔨 Maven — Build & Test
     runs-on: ubuntu-latest
+    # --- AGREGA ESTAS LÍNEAS AQUÍ ---
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: write # Recomendado si usas PRs
+    # --------------------------------
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
