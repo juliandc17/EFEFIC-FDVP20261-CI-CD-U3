@@ -86,7 +86,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           mvn verify sonar:sonar \
-            -Dsonar.projectKey=EFEFIC-FDVP20261-CI-CD-U3 \
+            -Dsonar.projectKey=juliandc17_EFEFIC-FDVP20261-CI-CD-U3 \
             -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }} \
             -Dsonar.host.url=https://sonarcloud.io \
             -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
