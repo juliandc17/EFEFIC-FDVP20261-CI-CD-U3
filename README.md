@@ -243,8 +243,8 @@ Servidor MCP local integrado al pipeline y compatible con Claude Desktop.
 
 ## Monitoreo — Grafana
 ![Grafana — Datasource Prometheus activo](docs/screenshots/09-grafana-datasource.png)
-![Grafana — Dashboard JVM con métricas](docs/screenshots/10-grafana-jvm.png)
-![Grafana — Dashboard Kubernetes](docs/screenshots/11-grafana-kubernetes.png)
+![Grafana — Alerts](docs/screenshots/10-grafana-alerts.png)
+![Grafana — Dashboard ](docs/screenshots/11-grafana-dash.png)
 
 ## Aplicación
 ![App — GET /actuator/health status UP](docs/screenshots/12-app-health.png)
