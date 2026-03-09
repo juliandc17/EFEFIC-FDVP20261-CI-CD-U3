@@ -19,6 +19,7 @@ pipeline {
     }
 
     stages {
+
         stage('Inicio') {
             steps {
                 echo "======================================="
@@ -30,6 +31,8 @@ pipeline {
             }
         }
 
+        // ── FIX: Usar """ (dobles) para que Groovy expanda ${env.DOCKER_IMAGE}
+        //         después de asignarlo en el bloque script {}
         stage('Preparar Imagen Docker') {
             steps {
                 withCredentials([usernamePassword(
@@ -40,36 +43,33 @@ pipeline {
                     script {
                         env.DOCKER_IMAGE = "${DOCKER_USER}/${APP_NAME}"
                     }
-                    // IMPORTANTE: Usar comillas simples ''' para evitar el Warning de seguridad
-                    sh '''
-                        echo "Iniciando sesión segura..."
-                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+                    sh """
+                        echo "Iniciando sesión segura en Docker Hub..."
+                        echo "\${DOCKER_PASS}" | docker login -u "\${DOCKER_USER}" --password-stdin
 
-                        echo "Buscando imagen ${DOCKER_IMAGE}:latest en Docker Hub..."
-                        
-                        if docker pull ${DOCKER_IMAGE}:latest; then
+                        echo "Buscando imagen \${DOCKER_IMAGE}:latest en Docker Hub..."
+
+                        if docker pull \${DOCKER_IMAGE}:latest; then
                             echo "✅ Imagen encontrada. Lista para desplegar."
                         else
-                            echo "⚠️ Imagen no encontrada en la nube. Construyendo desde el Dockerfile..."
-                            
-                            # Construye la imagen usando el Dockerfile de tu repositorio
-                            docker build -t ${DOCKER_IMAGE}:latest .
-                            
+                            echo "⚠️ Imagen no encontrada. Construyendo desde Dockerfile..."
+                            docker build -t \${DOCKER_IMAGE}:latest .
                             echo "🚀 Subiendo imagen a Docker Hub..."
-                            docker push ${DOCKER_IMAGE}:latest
+                            docker push \${DOCKER_IMAGE}:latest
                         fi
-                    '''
+                    """
                 }
             }
         }
 
         stage('Preparar Kubernetes') {
             steps {
-                sh '''
+                sh """
                     kubectl cluster-info
                     kubectl get namespace ${K8S_NAMESPACE} 2>/dev/null || \
                         kubectl create namespace ${K8S_NAMESPACE}
-                '''
+                    echo "Namespace ${K8S_NAMESPACE} listo."
+                """
             }
         }
 
@@ -86,41 +86,50 @@ pipeline {
                     usernameVariable: 'G_USER',
                     passwordVariable: 'G_PASS'
                 )]) {
-                    sh '''
+                    sh """
                         kubectl create secret generic grafana-credentials \
-                          --from-literal=admin-user=${G_USER} \
-                          --from-literal=admin-password=${G_PASS} \
+                          --from-literal=admin-user=\${G_USER} \
+                          --from-literal=admin-password=\${G_PASS} \
                           -n ${K8S_NAMESPACE} || true
-                    '''
+                        echo "Secret grafana-credentials verificado."
+                    """
                 }
             }
         }
 
         stage('Desplegar Aplicacion') {
             steps {
-                sh '''
+                sh """
                     echo "Aplicando configuraciones y desplegando..."
                     kubectl apply -f k8s/configmap.yaml  -n ${K8S_NAMESPACE}
                     kubectl apply -f k8s/deployment.yaml -n ${K8S_NAMESPACE}
                     kubectl apply -f k8s/service.yaml    -n ${K8S_NAMESPACE}
 
-                    # Actualizar imagen y forzar reinicio para asegurar cambios
-                    kubectl set image deployment/${APP_NAME} ${APP_NAME}=${DOCKER_IMAGE}:latest -n ${K8S_NAMESPACE}
+                    kubectl set image deployment/${APP_NAME} \
+                        ${APP_NAME}=\${DOCKER_IMAGE}:latest \
+                        -n ${K8S_NAMESPACE}
+
                     kubectl rollout restart deployment/${APP_NAME} -n ${K8S_NAMESPACE}
 
                     echo "Esperando a que los Pods estén listos..."
-                    kubectl rollout status deployment/${APP_NAME} -n ${K8S_NAMESPACE} --timeout=180s
-                '''
+                    kubectl rollout status deployment/${APP_NAME} \
+                        -n ${K8S_NAMESPACE} --timeout=180s
+
+                    kubectl get pods -n ${K8S_NAMESPACE} -l app=${APP_NAME}
+                """
             }
         }
 
+        // ── FIX: Eliminado python3 -m json.tool (no disponible en el pod Jenkins)
+        //         La respuesta JSON del MCP se imprime directamente — es legible
+        //         y válida como evidencia para el informe técnico.
         stage('Smoke Test & MCP') {
             steps {
-                sh '''
+                sh """
                     echo "=== Verificación Final ==="
                     sleep 10
-                    
-                    # Intento de Health Check
+
+                    echo "--- Health Check ---"
                     kubectl run smoke-${BUILD_NUMBER} \
                         --image=curlimages/curl:latest \
                         --restart=Never --rm -it \
@@ -128,12 +137,24 @@ pipeline {
                         -- curl -sf http://${APP_NAME}:8080/actuator/health \
                         && echo "✅ HEALTH CHECK OK" || echo "⚠️ App iniciando aún..."
 
-                    # Consulta al servidor MCP
-                    curl -sf -X POST ${MCP_URL} \
+                    echo ""
+                    echo "--- MCP: get_pods ---"
+                    curl -sf -X POST \${MCP_URL} \
                       -H 'Content-Type: application/json' \
-                      -d "{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"tools/call\\",\\"params\\":{\\"name\\":\\"get_pods\\",\\"arguments\\":{\\"namespace\\":\\"${K8S_NAMESPACE}\\",\\"label\\":\\"app=${APP_NAME}\\"}}}" \
-                      | python3 -m json.tool || true
-                '''
+                      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_pods","arguments":{"namespace":"${K8S_NAMESPACE}","label":"app=${APP_NAME}"}}}' \
+                      || echo "⚠️ MCP no responde — verificar pod mcp-k8s-server"
+
+                    echo ""
+                    echo "--- MCP: rollout_status ---"
+                    curl -sf -X POST \${MCP_URL} \
+                      -H 'Content-Type: application/json' \
+                      -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rollout_status","arguments":{"deployment":"${APP_NAME}","namespace":"${K8S_NAMESPACE}"}}}' \
+                      || true
+
+                    echo ""
+                    echo "=== Estado final del clúster ==="
+                    kubectl get all -n ${K8S_NAMESPACE}
+                """
             }
         }
     }
@@ -145,13 +166,16 @@ pipeline {
 Accesos locales (NodePort):
   App:         http://localhost:30080
   Jenkins:     http://localhost:30090
+  SonarQube:   http://localhost:30092
+  Prometheus:  http://localhost:30093
   Grafana:     http://localhost:30094
             """
         }
         failure {
             echo "❌ El pipeline falló. Revisando logs..."
-            sh "kubectl get pods -n ${K8S_NAMESPACE} -l app=${APP_NAME}"
+            sh "kubectl get pods -n ${K8S_NAMESPACE} -l app=${APP_NAME} || true"
             sh "kubectl describe deployment ${APP_NAME} -n ${K8S_NAMESPACE} || true"
+            sh "kubectl logs -l app=${APP_NAME} -n ${K8S_NAMESPACE} --tail=30 || true"
         }
     }
 }
