@@ -1,0 +1,158 @@
+---
+# ══════════════════════════════════════════════════════════════
+# GRAFANA — Kubernetes Secret + ConfigMaps + Deployment + Service
+#
+# ⚠️  SEGURIDAD: Las credenciales NO están en este archivo.
+#     Se leen desde el Secret 'grafana-credentials'.
+#     Crea el Secret ANTES de aplicar este archivo:
+#
+#     kubectl create secret generic grafana-credentials \
+#       --from-literal=admin-user=admin \
+#       --from-literal=admin-password=CAMBIA_ESTA_PASSWORD \
+#       -n devops-lab
+#
+# ══════════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: devops-lab
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus:9090
+        isDefault: true
+        access: proxy
+        jsonData:
+          timeInterval: "15s"
+          httpMethod: POST
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alerting
+  namespace: devops-lab
+data:
+  alerting.yaml: |
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: DevOps Lab Alerts
+        folder: Alerts
+        interval: 1m
+        rules:
+          - uid: pods-not-ready
+            title: Pods No Listos en devops-lab
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: prometheus
+                model:
+                  expr: sum(kube_pod_status_ready{namespace="devops-lab",condition="false"}) > 0
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+                  refId: A
+            noDataState: OK
+            execErrState: Error
+            for: 2m
+            annotations:
+              summary: Hay pods no listos en devops-lab
+            labels:
+              severity: warning
+          - uid: jvm-memory-high
+            title: Memoria JVM Alta
+            condition: C
+            data:
+              - refId: A
+                datasourceUid: prometheus
+                model:
+                  expr: jvm_memory_used_bytes{area="heap"} / jvm_memory_max_bytes{area="heap"} > 0.85
+                  intervalMs: 1000
+                  maxDataPoints: 43200
+                  refId: A
+            noDataState: OK
+            execErrState: Error
+            for: 5m
+            annotations:
+              summary: Heap JVM supera el 85%
+            labels:
+              severity: warning
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: devops-lab
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-credentials
+                  key: admin-user
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-credentials
+                  key: admin-password
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_UNIFIED_ALERTING_ENABLED
+              value: "true"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+          volumeMounts:
+            - name: grafana-storage
+              mountPath: /var/lib/grafana
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: alerting
+              mountPath: /etc/grafana/provisioning/alerting
+      volumes:
+        - name: grafana-storage
+          emptyDir: {}
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: alerting
+          configMap:
+            name: grafana-alerting
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: devops-lab
+spec:
+  type: NodePort
+  selector:
+    app: grafana
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 30094

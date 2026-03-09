@@ -1,0 +1,191 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-k8s-server
+  namespace: devops-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-k8s-reader
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, nodes, namespaces, endpoints]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcp-k8s-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mcp-k8s-reader
+subjects:
+  - kind: ServiceAccount
+    name: mcp-k8s-server
+    namespace: devops-lab
+---
+# ── Opción A: usar imagen pública de Node.js + montar código ──
+# El server.js se inyecta via ConfigMap (ver abajo)
+# ── Opción B: construir y publicar tu propia imagen ───────────
+#   cd mcp-k8s && docker build -t YOUR_DOCKERHUB_USERNAME/mcp-k8s-server:latest .
+#   docker push YOUR_DOCKERHUB_USERNAME/mcp-k8s-server:latest
+#   Luego cambia la imagen abajo por: YOUR_DOCKERHUB_USERNAME/mcp-k8s-server:latest
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-k8s-server
+  namespace: devops-lab
+  labels:
+    app: mcp-k8s-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-k8s-server
+  template:
+    metadata:
+      labels:
+        app: mcp-k8s-server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3100"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: mcp-k8s-server
+      initContainers:
+        - name: install-kubectl
+          image: bitnami/kubectl:latest
+          command: ['sh', '-c', 'cp /opt/bitnami/kubectl/bin/kubectl /mnt/tools/kubectl && chmod +x /mnt/tools/kubectl']
+          volumeMounts:
+            - name: tools
+              mountPath: /mnt/tools
+      containers:
+        - name: mcp-k8s-server
+          image: node:18-alpine
+          command: ["node", "/app/server.js"]
+          env:
+            - name: HTTP_MODE
+              value: "true"
+            - name: PORT
+              value: "3100"
+            - name: PATH
+              value: "/mnt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          ports:
+            - containerPort: 3100
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+            - name: tools
+              mountPath: /mnt/tools
+      volumes:
+        - name: app-code
+          configMap:
+            name: mcp-k8s-code
+        - name: tools
+          emptyDir: {}
+---
+# ConfigMap con el código del servidor MCP (autocontenido)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-k8s-code
+  namespace: devops-lab
+data:
+  server.js: |
+    // MCP K8s Server — cargado desde ConfigMap
+    // Código completo en mcp-k8s/server.js del repositorio
+    const { execSync } = require('child_process');
+    const http = require('http');
+    function kubectl(cmd) {
+      try { return execSync('kubectl ' + cmd, { encoding: 'utf8', timeout: 15000 }); }
+      catch(e) { return 'ERROR: ' + e.message; }
+    }
+    function kubectlJson(cmd) {
+      try { return JSON.parse(execSync('kubectl ' + cmd + ' -o json', { encoding: 'utf8', timeout: 15000 })); }
+      catch(e) { return { error: e.message }; }
+    }
+    const TOOLS = {
+      get_pods: {
+        description: 'Lista pods en un namespace',
+        inputSchema: { type: 'object', properties: { namespace: { type: 'string', default: 'devops-lab' }, label: { type: 'string' } } },
+        handler({ namespace='devops-lab', label='' }) {
+          const data = kubectlJson('get pods -n ' + namespace + (label ? ' -l ' + label : ''));
+          if (data.error) return data.error;
+          const pods = (data.items||[]).map(p => ({ name: p.metadata.name, status: p.status.phase, ready: p.status.conditions?.find(c=>c.type==='Ready')?.status==='True', restarts: p.status.containerStatuses?.[0]?.restartCount??0 }));
+          return JSON.stringify({ namespace, total: pods.length, pods }, null, 2);
+        }
+      },
+      cluster_health: {
+        description: 'Resumen general del cluster',
+        inputSchema: { type: 'object', properties: {} },
+        handler() {
+          const nodes = kubectlJson('get nodes');
+          const nodesSummary = (nodes.items||[]).map(n => ({ name: n.metadata.name, status: n.status.conditions?.find(c=>c.type==='Ready')?.status==='True'?'Ready':'NotReady' }));
+          return JSON.stringify({ nodes: nodesSummary }, null, 2);
+        }
+      },
+      rollout_status: {
+        description: 'Estado del rollout de un deployment',
+        inputSchema: { type: 'object', required: ['deployment'], properties: { deployment: { type: 'string' }, namespace: { type: 'string', default: 'devops-lab' } } },
+        handler({ deployment, namespace='devops-lab' }) {
+          return kubectl('rollout status deployment/' + deployment + ' -n ' + namespace + ' --timeout=60s');
+        }
+      }
+    };
+    function handleMcp(msg) {
+      const { id, method, params } = msg;
+      if (method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'mcp-k8s-server', version: '1.0.0' } } };
+      if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: Object.entries(TOOLS).map(([name,t]) => ({ name, description: t.description, inputSchema: t.inputSchema })) } };
+      if (method === 'tools/call') {
+        const tool = TOOLS[params?.name];
+        if (!tool) return { jsonrpc: '2.0', id, error: { code: -32601, message: 'Tool not found: ' + params?.name } };
+        try { return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: String(tool.handler(params?.arguments||{})) }] } }; }
+        catch(e) { return { jsonrpc: '2.0', id, error: { code: -32603, message: e.message } }; }
+      }
+      return { jsonrpc: '2.0', id, error: { code: -32601, message: 'Unknown: ' + method } };
+    }
+    const PORT = parseInt(process.env.PORT || '3100');
+    http.createServer((req, res) => {
+      if (req.url === '/metrics') {
+        const pods = kubectlJson('get pods -n devops-lab');
+        const running = (pods.items||[]).filter(p=>p.status.phase==='Running').length;
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('# HELP k8s_pods_running Running pods\n# TYPE k8s_pods_running gauge\nk8s_pods_running{namespace="devops-lab"} ' + running + '\n');
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/mcp') {
+        let body = '';
+        req.on('data', c => body += c);
+        req.on('end', () => { try { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(handleMcp(JSON.parse(body)))); } catch { res.writeHead(400); res.end('Bad Request'); } });
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', tools: Object.keys(TOOLS) }));
+    }).listen(PORT, () => console.log('MCP K8s Server :' + PORT));
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-k8s-server
+  namespace: devops-lab
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-k8s-server
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100

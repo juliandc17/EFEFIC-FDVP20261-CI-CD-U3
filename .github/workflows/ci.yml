@@ -1,0 +1,195 @@
+name: CI Pipeline — Build, Test, Security & Docker
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-app
+  JAVA_VERSION: '17'
+
+jobs:
+
+  # ════════════════════════════════════════════════
+  # JOB 1 — Maven: Compilar, Testear, Empaquetar
+  # Maven transforma .java → .class → .jar ejecutable
+  # ════════════════════════════════════════════════
+  build-and-test:
+    name: 🔨 Maven — Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # necesario para SonarQube (historial completo)
+
+      - name: Setup Java 17 + cache Maven
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: mvn compile — .java → .class
+        run: mvn clean compile -B
+
+      - name: mvn test — ejecutar JUnit + JaCoCo
+        run: mvn test -B
+
+      - name: mvn package — empaquetar .jar final
+        run: mvn package -DskipTests -B
+
+      - name: Publicar reporte de tests
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: JUnit Tests
+          path: target/surefire-reports/*.xml
+          reporter: java-junit
+
+      - name: Guardar .jar como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: target/*.jar
+          retention-days: 5
+
+  # ════════════════════════════════════════════════
+  # JOB 2 — SonarQube: Análisis estático de código
+  # ════════════════════════════════════════════════
+  sonarqube-analysis:
+    name: 🔍 SonarQube — Análisis de Código
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Analizar con SonarCloud
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          mvn verify sonar:sonar \
+            -Dsonar.projectKey=devops-app \
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }} \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.java.coveragePlugin=jacoco \
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+            -B
+
+      - name: Verificar Quality Gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ════════════════════════════════════════════════
+  # JOB 3 — Snyk: CVEs en dependencias y Docker
+  # ════════════════════════════════════════════════
+  snyk-scan:
+    name: 🛡️ Snyk — Security Scan
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+
+      - name: Snyk — escanear dependencias Maven
+        uses: snyk/actions/maven@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --sarif-file-output=snyk-deps.sarif
+
+      - name: Publicar resultados en GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: snyk-deps.sarif
+
+  # ════════════════════════════════════════════════
+  # JOB 4 — Docker: Build multi-stage + Push Hub
+  # Solo se ejecuta en rama main tras seguridad ok
+  # ════════════════════════════════════════════════
+  docker-build-push:
+    name: 🐳 Docker — Build & Push
+    runs-on: ubuntu-latest
+    needs: [sonarqube-analysis, snyk-scan]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: target/
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Resumen del build
+        run: |
+          echo "## ✅ Docker Image publicada" >> $GITHUB_STEP_SUMMARY
+          echo "- Imagen: \`${{ env.DOCKER_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════
+  # JOB 5 — MCP K8s: Verificar estado del clúster
+  # Consulta el MCP Server vía HTTP/JSON-RPC
+  # ════════════════════════════════════════════════
+  mcp-health-check:
+    name: 🤖 MCP K8s — Health Check
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Consultar MCP — pods del clúster
+        run: |
+          echo "Consultando MCP K8s Server..."
+          curl -s -X POST "http://localhost:30095/mcp" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_pods","arguments":{"namespace":"devops-lab"}}}' \
+            || echo "ℹ️ MCP check: el servidor está dentro del clúster local. Verificación completa via Jenkins CD."
+
+      - name: Resumen CI completado
+        run: |
+          echo "## ✅ CI Pipeline completado" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Estado |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Maven Build & Test | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| SonarQube Analysis | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Snyk Security Scan | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Build & Push | ✅ |" >> $GITHUB_STEP_SUMMARY

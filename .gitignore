@@ -1,0 +1,34 @@
+# Java
+target/
+*.class
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# ⚠️ SEGURIDAD — Nunca subir estos archivos
+.env
+*.env
+*.secret
+*-secret.yaml
+*-secrets.yaml
+secrets/
+kubeconfig
+.kubeconfig
+
+# Screenshots de evidencia (subir manualmente, son grandes)
+# docs/screenshots/*.png
+# docs/screenshots/*.jpg

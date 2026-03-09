@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "k8s-devops": {
+      "command": "node",
+      "args": ["RUTA_AL_PROYECTO/mcp-k8s/server.js"]
+    }
+  }
+}

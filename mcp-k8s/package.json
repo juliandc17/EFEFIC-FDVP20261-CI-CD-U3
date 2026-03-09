@@ -1,0 +1,11 @@
+{
+  "name": "mcp-k8s-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Kubernetes — EFEFIC-FDVP20261",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:http": "HTTP_MODE=true PORT=3100 node server.js"
+  },
+  "engines": { "node": ">=18" }
+}

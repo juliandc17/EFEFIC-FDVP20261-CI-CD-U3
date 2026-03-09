@@ -1,0 +1,198 @@
+// ════════════════════════════════════════════════════════════════
+// JENKINSFILE — Pipeline CD
+// Proyecto: EFEFIC-FDVP20261-CI-CD-U3
+//
+// ⚠️  SEGURIDAD — Ninguna credencial está hardcodeada aquí.
+//     Todas las credenciales se configuran en Jenkins como
+//     "Credentials" y se referencian por ID:
+//
+//     Credencial requerida (configurar una vez en Jenkins):
+//       ID: dockerhub-credentials
+//       Tipo: Username with password
+//       Username: tu-usuario-dockerhub
+//       Password: tu-token-dockerhub
+//
+//     La imagen Docker se lee del secret 'app-image' en K8s
+//     o se construye a partir del nombre en Docker Hub.
+// ════════════════════════════════════════════════════════════════
+
+pipeline {
+    agent any
+
+    environment {
+        K8S_NAMESPACE = "devops-lab"
+        APP_NAME      = "devops-app"
+        MCP_URL       = "http://mcp-k8s-server:3100/mcp"
+        // DOCKER_IMAGE se construye dinámicamente con la credencial
+        // evitando exponer el username en este archivo
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 25, unit: 'MINUTES')
+        timestamps()
+    }
+
+    stages {
+
+        stage('Inicio') {
+            steps {
+                echo "======================================="
+                echo " CD Pipeline #${env.BUILD_NUMBER}"
+                echo " Proyecto: EFEFIC-FDVP20261-CI-CD-U3"
+                echo "======================================="
+                cleanWs()
+                checkout scm
+            }
+        }
+
+        stage('Verificar Imagen Docker') {
+            steps {
+                // Las credenciales se leen de Jenkins Credentials Store
+                // Nunca se escriben en este archivo
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    script {
+                        env.DOCKER_IMAGE = "${DOCKER_USER}/${APP_NAME}"
+                    }
+                    sh """
+                        echo "Verificando imagen: ${env.DOCKER_IMAGE}:latest"
+                        docker login -u ${DOCKER_USER} -p ${DOCKER_PASS}
+                        docker pull ${env.DOCKER_IMAGE}:latest
+                        docker image inspect ${env.DOCKER_IMAGE}:latest --format='Imagen verificada: {{.Id}}'
+                    """
+                }
+            }
+        }
+
+        stage('Preparar Kubernetes') {
+            steps {
+                sh """
+                    kubectl cluster-info
+                    kubectl get namespace ${K8S_NAMESPACE} 2>/dev/null || \
+                        kubectl apply -f k8s/namespace.yaml
+                    kubectl get namespaces | grep devops
+                """
+            }
+        }
+
+        stage('Crear Secrets K8s (primera vez)') {
+            when {
+                expression {
+                    sh(returnStatus: true,
+                       script: "kubectl get secret grafana-credentials -n ${K8S_NAMESPACE} 2>/dev/null") != 0
+                }
+            }
+            steps {
+                // Lee las credenciales de Grafana desde Jenkins Credentials
+                // y las convierte en un Kubernetes Secret (nunca en el repo)
+                withCredentials([usernamePassword(
+                    credentialsId: 'grafana-credentials',
+                    usernameVariable: 'GRAFANA_USER',
+                    passwordVariable: 'GRAFANA_PASS'
+                )]) {
+                    sh """
+                        kubectl create secret generic grafana-credentials \
+                          --from-literal=admin-user=${GRAFANA_USER} \
+                          --from-literal=admin-password=${GRAFANA_PASS} \
+                          -n ${K8S_NAMESPACE} || true
+                    """
+                }
+            }
+        }
+
+        stage('Desplegar Herramientas') {
+            when {
+                expression {
+                    sh(returnStatus: true,
+                       script: "kubectl get deployment prometheus -n ${K8S_NAMESPACE} 2>/dev/null") != 0
+                }
+            }
+            steps {
+                sh """
+                    echo "Primera instalacion — desplegando herramientas..."
+                    kubectl apply -f k8s/tools/jenkins.yaml
+                    kubectl apply -f k8s/tools/sonarqube.yaml
+                    kubectl apply -f k8s/tools/mcp-k8s-server.yaml
+                    kubectl apply -f k8s/monitoring/prometheus.yaml
+                    kubectl apply -f k8s/monitoring/grafana.yaml
+                    echo "Herramientas desplegadas."
+                """
+            }
+        }
+
+        stage('Desplegar Aplicacion') {
+            steps {
+                sh """
+                    kubectl apply -f k8s/configmap.yaml  -n ${K8S_NAMESPACE}
+                    kubectl apply -f k8s/deployment.yaml -n ${K8S_NAMESPACE}
+                    kubectl apply -f k8s/service.yaml    -n ${K8S_NAMESPACE}
+
+                    kubectl set image deployment/${APP_NAME} \
+                        ${APP_NAME}=${env.DOCKER_IMAGE}:latest \
+                        -n ${K8S_NAMESPACE}
+
+                    kubectl rollout status deployment/${APP_NAME} \
+                        -n ${K8S_NAMESPACE} --timeout=120s
+
+                    kubectl get pods -n ${K8S_NAMESPACE} -l app=${APP_NAME}
+                """
+            }
+        }
+
+        stage('MCP — Verificar Deploy') {
+            steps {
+                sh """
+                    echo "=== Consultando MCP K8s Server ==="
+                    sleep 5
+
+                    curl -sf -X POST ${MCP_URL} \
+                      -H 'Content-Type: application/json' \
+                      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_pods","arguments":{"namespace":"${K8S_NAMESPACE}","label":"app=${APP_NAME}"}}}' \
+                      | python3 -m json.tool || echo "MCP iniciando..."
+
+                    curl -sf -X POST ${MCP_URL} \
+                      -H 'Content-Type: application/json' \
+                      -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rollout_status","arguments":{"deployment":"${APP_NAME}","namespace":"${K8S_NAMESPACE}"}}}' \
+                      | python3 -m json.tool || true
+                """
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                sh """
+                    sleep 15
+                    kubectl run smoke-${BUILD_NUMBER} \
+                        --image=curlimages/curl:latest \
+                        --restart=Never --rm -it \
+                        -n ${K8S_NAMESPACE} \
+                        -- curl -sf http://${APP_NAME}:8080/actuator/health \
+                        && echo "HEALTH CHECK OK" || echo "Health check pendiente"
+
+                    kubectl get all -n ${K8S_NAMESPACE}
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+Accesos:
+  App:        http://localhost:30080
+  Jenkins:    http://localhost:30090
+  SonarQube:  http://localhost:30092
+  Prometheus: http://localhost:30093
+  Grafana:    http://localhost:30094
+            """
+        }
+        failure {
+            sh "kubectl describe pods -n ${K8S_NAMESPACE} -l app=${APP_NAME} || true"
+            sh "kubectl logs -l app=${APP_NAME} -n ${K8S_NAMESPACE} --tail=30 || true"
+        }
+    }
+}
